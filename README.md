@@ -20,4 +20,4 @@ remote run devops commands built by axcboot
 - ls: list all active client, e.g. ls
 - isactive: show if client is active, e.g. [client name] isactive
 - download: order client to download remote file, e.g. [client name] download [remote url] [dir to save] [file name to save]
-- execute: order client to run command in Windows CMD, [client name] execute java -jar a.jar
+- execute: order client to run command in Windows CMD, e.g. [client name] execute java -jar a.jar
