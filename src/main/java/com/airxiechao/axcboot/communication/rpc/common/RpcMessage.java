@@ -2,6 +2,8 @@ package com.airxiechao.axcboot.communication.rpc.common;
 
 public class RpcMessage {
 
+    public static final String RESPONSE_SUFFIX = "_response";
+
     private String requestId;
     private String type;
     private String payload;
@@ -11,6 +13,10 @@ public class RpcMessage {
         this.requestId = requestId;
         this.type = type;
         this.payload = payload;
+    }
+
+    public boolean isResponse(){
+        return type.endsWith(RESPONSE_SUFFIX);
     }
 
     public String getType() {

@@ -17,6 +17,8 @@ import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static com.airxiechao.axcboot.communication.rpc.util.RpcUtil.buildResponseType;
+
 @Sharable
 public class RpcClientMessageRouter extends ChannelInboundHandlerAdapter {
 
@@ -25,7 +27,7 @@ public class RpcClientMessageRouter extends ChannelInboundHandlerAdapter {
     private Map<String, IRpcMessageHandler> serviceHandlers;
     private ThreadPoolExecutor executor;
     private RpcContext rpcContext = new RpcContext();
-    private Map<String, RpcFuture> pendingClients = new ConcurrentHashMap<>();
+    private Map<String, RpcFuture> pendingRequests = new ConcurrentHashMap<>();
     private RpcClient client;
 
     public RpcClientMessageRouter(Map<String, IRpcMessageHandler> serviceHandlers, int numWorkerThreads, RpcClient client){
@@ -66,11 +68,6 @@ public class RpcClientMessageRouter extends ChannelInboundHandlerAdapter {
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         close();
 
-        pendingClients.forEach((__, future) -> {
-            future.fail(new Exception("rpc-client-["+client.getName()+"] connection not active error"));
-        });
-        pendingClients.clear();
-
         // 尝试重连
         ctx.channel().eventLoop().schedule(() -> {
             client.connect();
@@ -78,15 +75,15 @@ public class RpcClientMessageRouter extends ChannelInboundHandlerAdapter {
     }
 
     @Override
-    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
         if (!(msg instanceof RpcMessage)) {
             return;
         }
 
         RpcMessage message = (RpcMessage) msg;
 
-        if(message.getType().endsWith("_response")){
-            this.handleClientMessage(ctx, message);
+        if(message.isResponse()){
+            this.handleResponseMessage(ctx, message);
         }else{
             this.executor.execute(() -> {
                 this.handleServiceMessage(ctx, message);
@@ -94,8 +91,14 @@ public class RpcClientMessageRouter extends ChannelInboundHandlerAdapter {
         }
     }
 
-    private void handleClientMessage(ChannelHandlerContext ctx, RpcMessage message){
-        RpcFuture future = pendingClients.remove(message.getRequestId());
+    /**
+     * 处理响应消息
+     * @param ctx
+     * @param message
+     * @throws Exception
+     */
+    private void handleResponseMessage(ChannelHandlerContext ctx, RpcMessage message) throws Exception {
+        RpcFuture future = pendingRequests.remove(message.getRequestId());
         if (future == null) {
             logger.error("future not found with type {}", message.getType());
             return;
@@ -105,18 +108,25 @@ public class RpcClientMessageRouter extends ChannelInboundHandlerAdapter {
             Response response = JSON.parseObject(message.getPayload(), Response.class);
             future.success(response);
         }catch (Exception e){
-            logger.error("handle response message error", e);
+            logger.error("parse response message error", e);
             future.fail(e);
+
+            throw new Exception("parse response message error", e);
         }
     }
 
+    /**
+     * 处理请求消息
+     * @param ctx
+     * @param message
+     */
     private void handleServiceMessage(ChannelHandlerContext ctx, RpcMessage message){
         IRpcMessageHandler handler = serviceHandlers.get(message.getType());
         Response response;
         if(null != handler){
-            String payload = message.getPayload();
-            Map payloadMap = JSON.parseObject(payload, Map.class);
             try {
+                String payload = message.getPayload();
+                Map payloadMap = JSON.parseObject(payload, Map.class);
                 response = handler.handle(ctx, payloadMap);
             }catch (Exception e){
                 logger.error("handle service [{}] error", message.getType(), e);
@@ -129,7 +139,7 @@ public class RpcClientMessageRouter extends ChannelInboundHandlerAdapter {
             response.error("no service [" + message.getType() + "]");
         }
 
-        ctx.writeAndFlush(new RpcMessage(message.getRequestId(), message.getType()+"_response", JSON.toJSONString(response)));
+        ctx.writeAndFlush(new RpcMessage(message.getRequestId(), buildResponseType(message.getType()), JSON.toJSONString(response)));
     }
 
     public RpcFuture sendToServer(RpcMessage message) {
@@ -141,7 +151,7 @@ public class RpcClientMessageRouter extends ChannelInboundHandlerAdapter {
         ChannelHandlerContext ctx1 = ctx;
         if (ctx != null) {
             ctx.channel().eventLoop().execute(() -> {
-                pendingClients.put(message.getRequestId(), future);
+                pendingRequests.put(message.getRequestId(), future);
                 ctx1.writeAndFlush(message);
             });
         } else {
@@ -163,14 +173,24 @@ public class RpcClientMessageRouter extends ChannelInboundHandlerAdapter {
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-        logger.error("connection error", cause);
+        ctx.close();
+
+        logger.error("close [{}] connection by uncaught error", client.getName(), cause);
     }
 
+    /**
+     * 关闭连接
+     */
     public void close() {
         ChannelHandlerContext ctx = rpcContext.getContext();
         if (ctx != null) {
             ctx.close();
         }
+
+        pendingRequests.forEach((__, future) -> {
+            future.fail(new Exception("rpc-client-["+client.getName()+"] connection not active error"));
+        });
+        pendingRequests.clear();
 
         updateRpcContext(null, null);
         client.setConnected(false);
